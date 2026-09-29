@@ -6,7 +6,8 @@ Wants=bluetooth.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/blueshift --server
+Environment=PYTHONUNBUFFERED=1
+ExecStart=%h/.local/bin/blueshift --server
 Restart=always
 RestartSec=3
 KillMode=process
