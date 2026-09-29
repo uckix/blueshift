@@ -18,7 +18,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "role": "server",                   # 'server' or 'client'
     "host_name": "Parrot",              # Host PC label
     "client_name": "ArchLab",           # Client PC label
-    "client_mac": "90:E8:68:95:76:DC",  # Target client Bluetooth MAC
+    "host_mac": "D8:5B:27:23:42:AA",    # Host PC Bluetooth MAC (Parrot)
+    "client_mac": "90:E8:68:95:76:DC",  # Target client Bluetooth MAC (ArchLab)
     "keyboard_device": "",              # Event node or empty for auto-detect
     "mouse_device": "",                 # Event node or empty for auto-detect
     "hotkey": "scroll_lock",            # 'scroll_lock', 'ctrl_alt_s', 'right_alt'

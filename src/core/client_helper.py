@@ -195,6 +195,21 @@ class ClientHelper:
                 dev_addr = str(ifaces[DEVICE_IFACE].get("Address", "")).upper().replace(":", "_")
                 if dev_addr == target or target in str(path).upper():
                     return str(path)
+
+        # If not cached, trigger a brief 2s discovery to pick up the advertisement
+        try:
+            adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
+            adapter.StartDiscovery()
+            time.sleep(2)
+            adapter.StopDiscovery()
+            for path, ifaces in manager.GetManagedObjects().items():
+                if DEVICE_IFACE in ifaces:
+                    dev_addr = str(ifaces[DEVICE_IFACE].get("Address", "")).upper().replace(":", "_")
+                    if dev_addr == target or target in str(path).upper():
+                        return str(path)
+        except Exception:
+            pass
+
         return None
 
     # ========================================================================

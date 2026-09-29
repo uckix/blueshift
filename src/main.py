@@ -96,7 +96,7 @@ def run_server_cli():
 def run_client_cli():
     """Run headless Target / Client auto-reconnect daemon."""
     logger.info("Starting BlueShift in Headless Client Daemon mode...")
-    target_mac = config.get("client_mac", "")
+    target_mac = config.get("host_mac", "D8:5B:27:23:42:AA")
     logger.info("Monitoring connection to Host: %s", target_mac)
 
     client_helper.start_auto_reconnect(target_mac)
