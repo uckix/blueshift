@@ -1,0 +1,3 @@
+# BlueShift BLE KVM switch evdev permissions rule
+# Allows non-root input grabbing and hotkey listening
+KERNEL=="event*", SUBSYSTEM=="input", MODE="0666", TAG+="uaccess"

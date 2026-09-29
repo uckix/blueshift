@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Background Gradient -->
+    <radialGradient id="bgGrad" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#182334"/>
+      <stop offset="70%" stop-color="#0e1522"/>
+      <stop offset="100%" stop-color="#080c14"/>
+    </radialGradient>
+
+    <!-- Outer Ring Gradient -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="50%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+
+    <!-- Bluetooth Neon Glow -->
+    <linearGradient id="bleGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#00d2ff"/>
+    </linearGradient>
+
+    <!-- Wave Glow -->
+    <linearGradient id="waveGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#10b981"/>
+      <stop offset="100%" stop-color="#00d2ff"/>
+    </linearGradient>
+
+    <filter id="neonGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <filter id="ringGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Base Circle Background -->
+  <circle cx="256" cy="256" r="240" fill="url(#bgGrad)" stroke="#1e2c40" stroke-width="4"/>
+
+  <!-- Outer Neon Orbital Rings -->
+  <circle cx="256" cy="256" r="226" fill="none" stroke="url(#ringGrad)" stroke-width="6" stroke-dasharray="24 12 8 12" filter="url(#ringGlow)" opacity="0.9"/>
+  <circle cx="256" cy="256" r="208" fill="none" stroke="#25354c" stroke-width="2" stroke-dasharray="6 6" opacity="0.6"/>
+
+  <!-- Left Shifting Arrow (Parrot / Host) -->
+  <path d="M 120 220 L 70 256 L 120 292" fill="none" stroke="#00d2ff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" filter="url(#neonGlow)"/>
+  <path d="M 74 256 L 150 256" fill="none" stroke="#00d2ff" stroke-width="8" stroke-linecap="round" opacity="0.85"/>
+
+  <!-- Right Shifting Arrow (ArchLab / Client) -->
+  <path d="M 392 220 L 442 256 L 392 292" fill="none" stroke="#10b981" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" opacity="0.85" filter="url(#neonGlow)"/>
+  <path d="M 438 256 L 362 256" fill="none" stroke="#10b981" stroke-width="8" stroke-linecap="round" opacity="0.85"/>
+
+  <!-- Dual Orbiting Dots -->
+  <circle cx="95" cy="180" r="6" fill="#00d2ff" filter="url(#neonGlow)"/>
+  <circle cx="417" cy="332" r="6" fill="#10b981" filter="url(#neonGlow)"/>
+
+  <!-- Stylized Bluetooth Rune in Center -->
+  <g filter="url(#neonGlow)" transform="translate(0, 0)">
+    <!-- Central Spine -->
+    <line x1="256" y1="120" x2="256" y2="392" stroke="url(#bleGrad)" stroke-width="20" stroke-linecap="round"/>
+
+    <!-- Upper Wings -->
+    <polyline points="256,120 330,185 200,300" fill="none" stroke="url(#bleGrad)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Lower Wings -->
+    <polyline points="256,392 330,327 200,212" fill="none" stroke="url(#bleGrad)" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- Glowing Core Accent Dots -->
+  <circle cx="256" cy="256" r="10" fill="#ffffff" filter="url(#neonGlow)"/>
+  <circle cx="330" cy="185" r="7" fill="#00d2ff"/>
+  <circle cx="330" cy="327" r="7" fill="#00d2ff"/>
+</svg>

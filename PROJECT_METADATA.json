@@ -1,0 +1,77 @@
+{
+  "name": "blueshift",
+  "displayName": "BlueShift",
+  "tagline": "Zero-Lag Bluetooth KVM for Linux",
+  "shortDescription": "High-performance Bluetooth Low Energy (BLE HOGP) KVM switch for Linux. Share a single keyboard and mouse across two computers with zero Wi-Fi lag, kernel-level evdev grabbing, and instant hotkey switching.",
+  "version": "1.0.0",
+  "license": "MIT",
+  "copyright": "Copyright (c) 2026 uckix",
+  "author": {
+    "name": "uckix",
+    "github": "https://github.com/uckix"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/uckix/blueshift"
+  },
+  "homepage": "https://github.com/uckix/blueshift#readme",
+  "bugs": {
+    "url": "https://github.com/uckix/blueshift/issues"
+  },
+  "primaryLanguage": "Python",
+  "categories": [
+    "System Utilities",
+    "Hardware & Peripherals",
+    "Bluetooth & Wireless",
+    "Input & Devices"
+  ],
+  "topics": [
+    "kvm",
+    "kvm-switch",
+    "bluetooth",
+    "bluetooth-low-energy",
+    "ble",
+    "hogp",
+    "hid",
+    "evdev",
+    "uinput",
+    "bluez",
+    "linux",
+    "wayland",
+    "x11",
+    "zero-lag",
+    "mouse-sharing",
+    "keyboard-sharing",
+    "software-kvm",
+    "air-gapped",
+    "python3"
+  ],
+  "supportedPlatforms": [
+    "Linux (Host: Arch, Debian, Ubuntu, Parrot, Fedora, RHEL, Gentoo)",
+    "Target: Any device supporting Bluetooth HID (Linux, macOS, Windows, Android, iPadOS)"
+  ],
+  "architectureRequirements": {
+    "host": {
+      "kernel": "Linux >= 5.8 (with evdev and uinput support)",
+      "bluetoothStack": "BlueZ >= 5.50 (with experimental LE Peripheral mode enabled)",
+      "adapter": "Bluetooth 4.2+ (BLE 5.0+ recommended for lowest latency)"
+    },
+    "target": {
+      "hardware": "Standard Bluetooth 4.0+ receiver",
+      "software": "Zero installation required (Driverless standard HID peripheral)"
+    }
+  },
+  "defaultHotkeys": [
+    "ScrollLock (Single-tap toggle)",
+    "Ctrl + Alt + S (Chord toggle)",
+    "Pause / Break (Alternative toggle)"
+  ],
+  "cliCommands": {
+    "daemon": "blueshift daemon --run",
+    "gui": "blueshift gui",
+    "switch": "blueshift switch [host|target|toggle]",
+    "status": "blueshift status",
+    "doctor": "blueshift doctor",
+    "pair": "blueshift pair --target <MAC_ADDRESS>"
+  }
+}

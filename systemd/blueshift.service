@@ -1,0 +1,16 @@
+[Unit]
+Description=BlueShift BLE KVM Host Server Daemon
+Documentation=https://github.com/blueshift/blueshift
+After=bluetooth.target dbus.service
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/blueshift --server
+Restart=always
+RestartSec=3
+KillMode=process
+TimeoutStopSec=5
+
+[Install]
+WantedBy=default.target
