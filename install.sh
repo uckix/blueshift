@@ -107,10 +107,10 @@ echo -e "\n${BLUE}[6/6] Creating blueshift command launcher...${NC}"
 WRAPPER_LOCAL="${USER_HOME}/.local/bin/blueshift"
 mkdir -p "${USER_HOME}/.local/bin"
 
-cat << 'EOF' > "${WRAPPER_LOCAL}"
+cat << EOF > "${WRAPPER_LOCAL}"
 #!/usr/bin/env bash
-export PYTHONPATH="/home/gg/blueshift:${PYTHONPATH}"
-exec /usr/bin/python3 /home/gg/blueshift/src/main.py "$@"
+export PYTHONPATH="${SCRIPT_DIR}:\${PYTHONPATH}"
+exec /usr/bin/python3 "${SCRIPT_DIR}/src/main.py" "\$@"
 EOF
 chmod +x "${WRAPPER_LOCAL}"
 echo -e "${GREEN}✔ Created user launcher at ${WRAPPER_LOCAL}.${NC}"
