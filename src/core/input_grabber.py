@@ -146,6 +146,7 @@ class InputGrabber:
 
         # IPC Server thread
         self._ipc_thread: Optional[threading.Thread] = None
+        self._ipc_bound = False
 
     def start(self, kbd_path: Optional[str] = None, mouse_path: Optional[str] = None) -> bool:
         """Start monitoring and event translation."""
@@ -485,15 +486,25 @@ class InputGrabber:
         """Listen on UNIX domain socket for CLI requests (e.g. blueshift --toggle)."""
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         if SOCKET_FILE.exists():
+            if send_ipc_command("STATUS") is not None:
+                logger.info("Another BlueShift instance is already serving IPC socket at %s. Skipping IPC bind.", SOCKET_FILE)
+                self._ipc_bound = False
+                return
             try:
                 SOCKET_FILE.unlink()
             except Exception:
                 pass
 
-        server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server_sock.bind(str(SOCKET_FILE))
-        server_sock.listen(5)
-        server_sock.settimeout(0.5)
+        try:
+            server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            server_sock.bind(str(SOCKET_FILE))
+            server_sock.listen(5)
+            server_sock.settimeout(0.5)
+            self._ipc_bound = True
+        except Exception as e:
+            logger.warning("Failed to bind IPC socket: %s", e)
+            self._ipc_bound = False
+            return
 
         logger.info("IPC socket listening at %s", SOCKET_FILE)
         while not self._stop_event.is_set():
@@ -522,7 +533,7 @@ class InputGrabber:
                     logger.debug("IPC server exception: %s", e)
 
         server_sock.close()
-        if SOCKET_FILE.exists():
+        if self._ipc_bound and SOCKET_FILE.exists():
             try:
                 SOCKET_FILE.unlink()
             except Exception:

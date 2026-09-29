@@ -23,7 +23,7 @@ from ..core.config import config, CONFIG_DIR
 from ..core.ble_server import ble_server
 from ..core.input_grabber import (
     InputGrabber, list_input_devices, auto_detect_devices,
-    CONTROL_LOCAL, CONTROL_REMOTE
+    CONTROL_LOCAL, CONTROL_REMOTE, send_ipc_command
 )
 from ..core.client_helper import client_helper
 from .style import apply_theme
@@ -126,19 +126,26 @@ class MainWindow(QMainWindow):
 
         # System Tray Integration
         self.tray = BlueShiftTray(self)
-        self.tray.switch_requested.connect(self.grabber.toggle_control)
+        self.tray.switch_requested.connect(self._toggle_control_action)
         self.tray.show_window_requested.connect(self._restore_window)
         self.tray.quit_requested.connect(self._quit_application)
 
         # Periodic refresh timers
         self._status_timer = QTimer(self)
-        self._status_timer.setInterval(2000)
+        self._status_timer.setInterval(1500)
         self._status_timer.timeout.connect(self._periodic_status_check)
         self._status_timer.start()
 
-        # Autostart server if configured
-        if config.get("server_autostart", True):
-            QTimer.singleShot(500, self._start_server)
+        # Configure initial view and startup based on configured role
+        if config.get("role") == "client":
+            self.tab_widget.setCurrentIndex(1)
+            self.badge_server.setVisible(False)
+            QTimer.singleShot(300, self._refresh_client_devices_table)
+            QTimer.singleShot(600, self._check_virtual_devices)
+        else:
+            self.tab_widget.setCurrentIndex(0)
+            if config.get("server_autostart", True):
+                QTimer.singleShot(500, self._start_server)
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -277,7 +284,7 @@ class MainWindow(QMainWindow):
         self.btn_big_switch = QPushButton("⇄  SWITCH CONTROL")
         self.btn_big_switch.setProperty("class", "BigSwitchButton")
         self.btn_big_switch.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_big_switch.clicked.connect(self.grabber.toggle_control)
+        self.btn_big_switch.clicked.connect(self._toggle_control_action)
         center_vbox.addWidget(self.btn_big_switch, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.lbl_hotkey_hint = QLabel("Hotkey: [ Scroll Lock ]")
@@ -589,8 +596,34 @@ class MainWindow(QMainWindow):
     # Logic & Event Handlers
     # ========================================================================
 
+    def _toggle_control_action(self):
+        """Toggle active control between Local and Remote either via IPC daemon or local grabber."""
+        status_resp = send_ipc_command("TOGGLE")
+        if status_resp and "OK" in status_resp:
+            new_state = CONTROL_REMOTE if "REMOTE" in status_resp else CONTROL_LOCAL
+            self.grabber.current_control = new_state
+            self._on_control_switched(new_state)
+            self._on_pulse()
+        else:
+            self.grabber.toggle_control()
+
     def _start_server(self):
         """Start the BlueZ BLE server and input grabber."""
+        # Check if background daemon is already active
+        status_resp = send_ipc_command("STATUS")
+        if status_resp:
+            self._append_log("BlueShift background daemon is active. Connected via IPC.")
+            self.badge_server.setText("● DAEMON ACTIVE")
+            self.badge_server.setStyleSheet("background-color: #064e3b; color: #34d399; border: 1px solid #059669; border-radius: 6px; padding: 4px 10px; font-weight: 700; font-size: 11px;")
+            self.btn_toggle_server.setText("Daemon Active")
+            self.btn_toggle_server.setEnabled(False)
+            self._update_adapter_display()
+            if "REMOTE" in status_resp:
+                self._on_control_switched(CONTROL_REMOTE)
+            else:
+                self._on_control_switched(CONTROL_LOCAL)
+            return
+
         self._append_log("Starting BLE GATT Peripheral Server...")
         success = ble_server.start()
         if success:
@@ -617,6 +650,8 @@ class MainWindow(QMainWindow):
 
     def _stop_server(self):
         """Stop BLE server and input grabber."""
+        if not ble_server.is_running:
+            return
         self._append_log("Stopping BLE GATT Server...")
         self.grabber.stop()
         ble_server.stop()
@@ -868,8 +903,24 @@ WantedBy=default.target
         self.txt_log.append(f"[{timestamp}] {message}")
 
     def _periodic_status_check(self):
+        if config.get("role") == "client":
+            self._check_virtual_devices()
+            return
+
         if ble_server.is_running:
             self._update_adapter_display()
+        else:
+            status_resp = send_ipc_command("STATUS")
+            if status_resp:
+                self.badge_server.setText("● DAEMON ACTIVE")
+                self.badge_server.setStyleSheet("background-color: #064e3b; color: #34d399; border: 1px solid #059669; border-radius: 6px; padding: 4px 10px; font-weight: 700; font-size: 11px;")
+                self._update_adapter_display()
+                if "REMOTE" in status_resp and self.grabber.current_control != CONTROL_REMOTE:
+                    self.grabber.current_control = CONTROL_REMOTE
+                    self._on_control_switched(CONTROL_REMOTE)
+                elif "LOCAL" in status_resp and self.grabber.current_control != CONTROL_LOCAL:
+                    self.grabber.current_control = CONTROL_LOCAL
+                    self._on_control_switched(CONTROL_LOCAL)
 
     def _restore_window(self):
         self.show()
@@ -878,7 +929,8 @@ WantedBy=default.target
         self.activateWindow()
 
     def _quit_application(self):
-        self._stop_server()
+        if ble_server.is_running:
+            self._stop_server()
         if hasattr(self, "tray"):
             self.tray.tray_icon.hide()
         self.close()
@@ -890,5 +942,6 @@ WantedBy=default.target
             self.hide()
             self.tray.show_message("BlueShift Minimized", "BlueShift is running in background. Click tray icon to open.")
         else:
-            self._stop_server()
+            if ble_server.is_running:
+                self._stop_server()
             event.accept()
