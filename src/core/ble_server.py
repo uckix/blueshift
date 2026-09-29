@@ -216,12 +216,11 @@ class Advertisement(dbus.service.Object):
 
     def get_properties(self) -> Dict[str, Any]:
         props: Dict[str, Any] = {
-            "Type": "peripheral",
-            "ServiceUUIDs": dbus.Array(self.service_uuids, signature="s"),
+            "Type": dbus.String("peripheral"),
+            "ServiceUUIDs": dbus.Array(["1812", "180F", "180A"], signature="s"),
             "LocalName": dbus.String(self.local_name),
-            "Appearance": dbus.UInt16(0x03C0),  # Generic Human Interface Device
+            "Appearance": dbus.UInt16(960),  # 0x03C0 = Generic HID
             "Discoverable": dbus.Boolean(True),
-            "Includes": dbus.Array(["tx-power", "appearance", "local-name"], signature="s"),
         }
         return {LE_ADV_IFACE: props}
 
