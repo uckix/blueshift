@@ -1,16 +1,15 @@
 [Unit]
-Description=BlueShift BLE KVM Host Server Daemon
-Documentation=https://github.com/blueshift/blueshift
+Description=BlueShift - Bluetooth keyboard & mouse sharing
+Documentation=https://github.com/uckix/blueshift
 After=bluetooth.target dbus.service
 Wants=bluetooth.target
 
 [Service]
 Type=simple
 Environment=PYTHONUNBUFFERED=1
-ExecStart=%h/.local/bin/blueshift --server
+ExecStart=%h/.local/bin/blueshift daemon
 Restart=always
 RestartSec=3
-KillMode=process
 TimeoutStopSec=5
 
 [Install]

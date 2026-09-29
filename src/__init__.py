@@ -1,6 +1,6 @@
 """
-BlueShift - Bluetooth Low Energy KVM Switch for Linux
+BlueShift - Bluetooth keyboard & mouse sharing for Linux
 """
 
-__version__ = "1.0.0"
-__author__ = "BlueShift Team"
+__version__ = "2.0.0"
+__author__ = "uckix"

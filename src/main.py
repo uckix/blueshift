@@ -1,175 +1,96 @@
 """
-BlueShift Main Application Entry Point.
-Supports modern PyQt6 GUI mode, headless CLI server daemon, and client reconnect daemon.
+BlueShift entry point.
+
+  blueshift                 open the window
+  blueshift daemon          run the background service (systemd runs this)
+  blueshift toggle|local|remote|status|connect|repair
+  blueshift setup --role server|client [--peer MAC] [--peer-name NAME]
 """
 
 import sys
-import os
-import signal
+import json
+import socket
 import argparse
 import logging
-import time
 from pathlib import Path
 
-# Ensure package directory is on python path
+# Allow running as `python3 src/main.py`
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
-from src.core.config import config
-from src.core.ble_server import ble_server
-from src.core.input_grabber import (
-    InputGrabber, send_ipc_command,
-    CONTROL_LOCAL, CONTROL_REMOTE
-)
-from src.core.client_helper import client_helper
+from src import __version__
+from src.core.config import config, ROLE_SERVER, ROLE_CLIENT
 
-logger = logging.getLogger("blueshift")
-
-
-def setup_logging(verbose: bool = False):
-    """Configure structured console logging."""
-    level = logging.DEBUG if verbose else logging.INFO
-    log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    logging.basicConfig(level=level, format=log_format, datefmt="%H:%M:%S")
+COMMANDS = ("toggle", "local", "remote", "status", "connect", "repair")
+# Flags from v1.0 (still used by old desktop files / scripts)
+LEGACY_FLAGS = {"--toggle": ["toggle"], "--local": ["local"], "--remote": ["remote"],
+                "--status": ["status"], "--gui": [], "--server": ["daemon", "--role", "server"],
+                "--client": ["daemon", "--role", "client"]}
 
 
-def run_gui():
-    """Launch the PyQt6 graphical desktop application."""
-    from PyQt6.QtWidgets import QApplication
-    from src.gui.main_window import MainWindow
-
-    # Enable high DPI scaling
-    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
-
-    app = QApplication(sys.argv)
-    app.setApplicationName("BlueShift")
-    app.setOrganizationName("BlueShift")
-
-    # Clean exit on Ctrl+C in terminal
-    signal.signal(signal.SIGINT, signal.SIG_DFL)
-
-    window = MainWindow()
-    if not config.get("start_minimized", False):
-        window.show()
-
-    sys.exit(app.exec())
+def run_gui() -> int:
+    from src.gui.app import run
+    return run()
 
 
-def run_server_cli():
-    """Run headless Host / Server daemon in terminal or systemd."""
-    logger.info("Starting BlueShift in Headless Server Daemon mode...")
-
-    # Start BlueZ GATT Server
-    if not ble_server.start():
-        logger.error("Failed to start BlueZ GATT server. Exiting.")
-        sys.exit(1)
-
-    # Start Input Grabber
-    grabber = InputGrabber(ble_server)
-    grabber.start()
-
-    logger.info("Host: %s, Target Client: %s", config.get("host_name"), config.get("client_name"))
-    logger.info("Active Control: LOCAL (%s)", config.get("host_name"))
-    logger.info("Press configured hotkey ([%s]) to switch control.", config.get("hotkey"))
-    logger.info("Press Ctrl+C to terminate server daemon.")
-
-    stop_event = False
-
-    def handle_sig(sig, frame):
-        nonlocal stop_event
-        logger.info("Shutdown signal received...")
-        stop_event = True
-
-    signal.signal(signal.SIGINT, handle_sig)
-    signal.signal(signal.SIGTERM, handle_sig)
-
-    try:
-        while not stop_event:
-            time.sleep(0.5)
-    finally:
-        grabber.stop()
-        ble_server.stop()
-        logger.info("BlueShift Server daemon exited cleanly.")
+def run_command(cmd: str) -> int:
+    from src.core.ipc import request
+    reply = request(cmd, timeout=3.0)
+    if reply is None:
+        print("BlueShift service is not running. Start it with: systemctl --user start blueshift")
+        return 1
+    print(json.dumps(reply, indent=2))
+    return 0 if reply.get("ok") else 1
 
 
-def run_client_cli():
-    """Run headless Target / Client auto-reconnect daemon."""
-    logger.info("Starting BlueShift in Headless Client Daemon mode...")
-    target_mac = config.get("host_mac", "D8:5B:27:23:42:AA")
-    logger.info("Monitoring connection to Host: %s", target_mac)
-
-    client_helper.start_auto_reconnect(target_mac)
-    logger.info("Auto-reconnect daemon active. Press Ctrl+C to stop.")
-
-    stop_event = False
-
-    def handle_sig(sig, frame):
-        nonlocal stop_event
-        logger.info("Shutdown signal received...")
-        stop_event = True
-
-    signal.signal(signal.SIGINT, handle_sig)
-    signal.signal(signal.SIGTERM, handle_sig)
-
-    try:
-        while not stop_event:
-            time.sleep(1.0)
-    finally:
-        client_helper.stop_auto_reconnect()
-        logger.info("BlueShift Client daemon exited cleanly.")
+def run_setup(args) -> int:
+    values = {"role": args.role,
+              "client_name" if args.role == ROLE_CLIENT else "host_name": socket.gethostname()}
+    if args.peer:
+        values["host_mac" if args.role == ROLE_CLIENT else "client_mac"] = args.peer.upper()
+        if args.role == ROLE_CLIENT and args.peer.upper() != (config.get("host_mac") or "").upper():
+            values["le_paired"] = False
+    if args.peer_name:
+        values["host_name" if args.role == ROLE_CLIENT else "client_name"] = args.peer_name
+    config.update(values)
+    print(json.dumps(config.as_dict(), indent=2))
+    return 0
 
 
-def handle_ipc_command(cmd: str):
-    """Dispatch CLI command to running BlueShift instance via IPC socket."""
-    response = send_ipc_command(cmd)
-    if response:
-        print(f"[BlueShift IPC] {response}")
-        sys.exit(0)
-    else:
-        print(f"[BlueShift] Error: No running BlueShift instance found (or IPC socket unavailable).")
-        sys.exit(1)
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    for i, arg in enumerate(argv):
+        if arg in LEGACY_FLAGS:
+            argv[i:i + 1] = LEGACY_FLAGS[arg]
+            break
 
+    parser = argparse.ArgumentParser(prog="blueshift", description="BlueShift — Bluetooth keyboard & mouse sharing")
+    parser.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    parser.add_argument("--version", action="version", version=f"BlueShift {__version__}")
+    sub = parser.add_subparsers(dest="command")
+    d = sub.add_parser("daemon", help="run the background service")
+    d.add_argument("--role", choices=[ROLE_SERVER, ROLE_CLIENT], help="override the configured role")
+    s = sub.add_parser("setup", help="write the configuration non-interactively")
+    s.add_argument("--role", choices=[ROLE_SERVER, ROLE_CLIENT], required=True)
+    s.add_argument("--peer", help="Bluetooth MAC of the other PC")
+    s.add_argument("--peer-name", help="display name of the other PC")
+    for c in COMMANDS:
+        sub.add_parser(c, help=f"send '{c}' to the running service")
 
-def main():
-    parser = argparse.ArgumentParser(
-        prog="blueshift",
-        description="BlueShift — Bluetooth Low Energy KVM Switch for Linux",
-    )
-    group = parser.add_mutually_exclusive_group()
-    group.add_argument("--gui", action="store_true", help="Launch PyQt6 GUI Dashboard (Default)")
-    group.add_argument("--server", action="store_true", help="Run headless Host / Server daemon")
-    group.add_argument("--client", action="store_true", help="Run headless Target / Client reconnect daemon")
-    group.add_argument("--toggle", action="store_true", help="Toggle control between Local and Remote on running instance")
-    group.add_argument("--local", action="store_true", help="Switch control to Local host on running instance")
-    group.add_argument("--remote", action="store_true", help="Switch control to Remote client on running instance")
-    group.add_argument("--status", action="store_true", help="Query status of running instance")
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S")
 
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose debug logging")
-    parser.add_argument("--version", action="version", version="BlueShift 1.0.0")
-
-    args = parser.parse_args()
-    setup_logging(args.verbose)
-
-    # IPC commands
-    if args.toggle:
-        handle_ipc_command("TOGGLE")
-    elif args.local:
-        handle_ipc_command("LOCAL")
-    elif args.remote:
-        handle_ipc_command("REMOTE")
-    elif args.status:
-        handle_ipc_command("STATUS")
-
-    # Execution modes
-    if args.server:
-        run_server_cli()
-    elif args.client:
-        run_client_cli()
-    else:
-        # Default is GUI mode
-        run_gui()
+    if args.command == "daemon":
+        from src.core.daemon import run_daemon
+        return run_daemon(args.role or config.get("role"))
+    if args.command == "setup":
+        return run_setup(args)
+    if args.command in COMMANDS:
+        return run_command(args.command)
+    return run_gui()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

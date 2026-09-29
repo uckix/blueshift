@@ -1,178 +1,234 @@
 """
-Automated Test Suite for BlueShift BLE KVM Switch.
-Tests core modules, BLE reports, evdev mapping, config manager, and PyQt6 GUI offscreen.
+BlueShift test suite. Runs without Bluetooth or input hardware (fakes stand in for both).
 """
 
-import sys
 import os
+import sys
+import json
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-# Add project root to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from src.core.hid_constants import (
-    REPORT_MAP_BYTES, REPORT_ID_KEYBOARD, REPORT_ID_MOUSE,
-    EVDEV_TO_HID_KEY, MODIFIER_MASKS, MOUSE_BUTTON_MASKS,
-    UUID_HOGP, UUID_DIS, UUID_BAS
-)
-from src.core.config import ConfigManager, DEFAULT_CONFIG
+import evdev
+from evdev import ecodes as e
+
+from src.core.hid_constants import REPORT_MAP_BYTES, REPORT_ID_KEYBOARD, REPORT_ID_MOUSE, EVDEV_TO_HID_KEY, MODIFIER_MASKS
+from src.core.config import ConfigManager, config
 from src.core.ble_server import BleServer
-from src.core.input_grabber import (
-    InputGrabber, list_input_devices, auto_detect_devices,
-    CONTROL_LOCAL, CONTROL_REMOTE
-)
-from src.core.client_helper import ClientHelper
+from src.core import input_grabber
+from src.core.input_grabber import InputGrabber, CONTROL_LOCAL, CONTROL_REMOTE
+from src.core import ipc
+
+
+class FakeBle:
+    def __init__(self, ready=True):
+        self.ready = ready
+        self.kb = []
+        self.mouse = []
+
+    def send_keyboard_report(self, mods, keys):
+        self.kb.append((mods, list(keys)))
+
+    def send_mouse_report(self, buttons, dx, dy, wheel=0, hwheel=0):
+        self.mouse.append((buttons, dx, dy, wheel, hwheel))
+
+
+class FakeDev:
+    def __init__(self, held=()):
+        self.name = "Fake Keyboard"
+        self.held = list(held)
+        self.grabbed = False
+
+    def active_keys(self):
+        return self.held
+
+    def grab(self):
+        self.grabbed = True
+
+    def ungrab(self):
+        self.grabbed = False
+
+
+def key(code, value):
+    return evdev.InputEvent(0, 0, e.EV_KEY, code, value)
+
+
+def rel(code, value):
+    return evdev.InputEvent(0, 0, e.EV_REL, code, value)
+
+
+SYN = evdev.InputEvent(0, 0, e.EV_SYN, e.SYN_REPORT, 0)
 
 
 class TestHidConstants(unittest.TestCase):
-    def test_report_map_descriptor(self):
-        self.assertGreater(len(REPORT_MAP_BYTES), 100)
-        # Check Report IDs present in descriptor
+    def test_report_map(self):
         self.assertIn(bytes([0x85, REPORT_ID_KEYBOARD]), REPORT_MAP_BYTES)
         self.assertIn(bytes([0x85, REPORT_ID_MOUSE]), REPORT_MAP_BYTES)
 
-    def test_modifier_masks(self):
-        self.assertEqual(len(MODIFIER_MASKS), 8)
+    def test_modifiers_and_keys(self):
         self.assertEqual(sum(MODIFIER_MASKS.values()), 0xFF)
-
-    def test_evdev_to_hid(self):
-        # Key 'A' should map to HID 0x04
-        import evdev.ecodes as e
         self.assertEqual(EVDEV_TO_HID_KEY[e.KEY_A], 0x04)
-        self.assertEqual(EVDEV_TO_HID_KEY[e.KEY_Z], 0x1D)
-        self.assertEqual(EVDEV_TO_HID_KEY[e.KEY_ENTER], 0x28)
-        self.assertEqual(EVDEV_TO_HID_KEY[e.KEY_SPACE], 0x2C)
+        self.assertEqual(EVDEV_TO_HID_KEY[e.KEY_102ND], 0x64)
+        # Every mapped key must fit the report map's logical maximum (0x65)
+        self.assertLessEqual(max(EVDEV_TO_HID_KEY.values()), 0x65)
 
 
-class TestConfigManager(unittest.TestCase):
+class TestConfig(unittest.TestCase):
     def setUp(self):
-        self.tmp_config = PROJECT_ROOT / "tests" / "scratch_config.json"
-        if self.tmp_config.exists():
-            self.tmp_config.unlink()
-        self.cfg = ConfigManager(self.tmp_config)
+        self.tmp = Path(tempfile.mkdtemp()) / "config.json"
+
+    def test_persistence(self):
+        cfg = ConfigManager(self.tmp)
+        cfg.set("client_name", "archlab")
+        self.assertEqual(ConfigManager(self.tmp).get("client_name"), "archlab")
+
+    def test_legacy_and_bad_values(self):
+        self.tmp.write_text(json.dumps({"role": "target", "hotkey": "nope", "battery_level": 5}))
+        cfg = ConfigManager(self.tmp)
+        self.assertEqual(cfg.get("role"), "client")
+        self.assertEqual(cfg.get("hotkey"), "ctrl_alt_s")
+        self.assertEqual(cfg.get("battery_level"), 5)  # unknown keys preserved
+
+    def test_corrupt_file(self):
+        self.tmp.write_text("{not json")
+        self.assertEqual(ConfigManager(self.tmp).get("role"), "server")
+
+
+class TestReports(unittest.TestCase):
+    def test_encoding(self):
+        server = BleServer()
+        sent = {}
+
+        class Char:
+            def __init__(self, k):
+                self.k = k
+
+            def notify_value(self, v):
+                sent[self.k] = v
+
+        server.kb_char, server.mouse_char = Char("kb"), Char("m")
+        server.send_keyboard_report(0x01, [0x04, 0x05])
+        self.assertEqual(sent["kb"], bytes([1, 0, 4, 5, 0, 0, 0, 0]))
+        server.send_mouse_report(0x01, 10, -15, 1, -1)
+        self.assertEqual(sent["m"], bytes([1, 10, 0, 0xF1, 0xFF, 1, 0xFF]))
+        server.send_mouse_report(0, 99999, -99999, 500, -500)  # clamped, no OverflowError
+        self.assertEqual(len(sent["m"]), 7)
+
+
+class TestInputEngine(unittest.TestCase):
+    def setUp(self):
+        self.ble = FakeBle()
+        self.g = InputGrabber(self.ble)
+        self.dev = FakeDev()
+        self.g.devices = {"/dev/input/fake": self.dev}
+        self.notify = mock.patch.object(input_grabber, "send_desktop_notification").start()
+        self.hotkey = mock.patch.dict(config._data, {"hotkey": "ctrl_alt_s", "mouse_sensitivity": 1.0}).start()
 
     def tearDown(self):
-        if self.tmp_config.exists():
-            self.tmp_config.unlink()
+        mock.patch.stopall()
 
-    def test_defaults_and_persistence(self):
-        self.assertEqual(self.cfg.get("role"), "server")
-        self.assertEqual(self.cfg.get("host_name"), "Parrot")
-        self.assertEqual(self.cfg.get("client_name"), "ArchLab")
+    def feed(self, *events):
+        for ev in events:
+            self.g._handle_event(ev)
+        self.g._maybe_finish_grab()
 
-        # Set and test save
-        self.cfg.set("host_name", "ParrotOS")
-        self.assertEqual(self.cfg.get("host_name"), "ParrotOS")
+    def test_hotkey_waits_for_release_before_grabbing(self):
+        self.dev.held = [e.KEY_LEFTCTRL, e.KEY_LEFTALT, e.KEY_S]
+        self.feed(key(e.KEY_LEFTCTRL, 1), key(e.KEY_LEFTALT, 1), key(e.KEY_S, 1))
+        self.assertEqual(self.g.current_control, CONTROL_LOCAL)  # still held -> not grabbed yet
+        self.assertFalse(self.dev.grabbed)
+        self.dev.held = []
+        self.feed(key(e.KEY_S, 0), key(e.KEY_LEFTALT, 0), key(e.KEY_LEFTCTRL, 0))
+        self.assertEqual(self.g.current_control, CONTROL_REMOTE)
+        self.assertTrue(self.dev.grabbed)
+        self.assertEqual(self.ble.kb, [])  # the hotkey itself never reaches the target
 
-        # Reload from disk
-        cfg2 = ConfigManager(self.tmp_config)
-        self.assertEqual(cfg2.get("host_name"), "ParrotOS")
+    def test_refuses_remote_without_target(self):
+        self.ble.ready = False
+        self.assertEqual(self.g.set_control(CONTROL_REMOTE), "target not connected")
+        self.assertEqual(self.g.current_control, CONTROL_LOCAL)
 
-    def test_listener_callback(self):
-        changed = []
-        self.cfg.add_listener(lambda k, v: changed.append((k, v)))
-        self.cfg.set("hotkey", "ctrl_alt_s")
-        self.assertEqual(changed, [("hotkey", "ctrl_alt_s")])
+    def test_target_lost_returns_control(self):
+        self.g.set_control(CONTROL_REMOTE)
+        self.g._maybe_finish_grab()
+        self.assertEqual(self.g.current_control, CONTROL_REMOTE)
+        self.g.target_lost()
+        self.assertEqual(self.g.current_control, CONTROL_LOCAL)
+        self.assertFalse(self.dev.grabbed)
+        self.assertEqual(self.ble.kb[-1], (0, []))  # all keys released on target
 
+    def test_no_mouse_jump_after_local_movement(self):
+        self.feed(rel(e.REL_X, 500), rel(e.REL_Y, 500), SYN)  # moving locally
+        self.g.set_control(CONTROL_REMOTE)
+        self.g._maybe_finish_grab()
+        self.g._last_mouse_send = 0
+        self.feed(rel(e.REL_X, 3), SYN)
+        self.assertEqual(self.ble.mouse[-1][1:3], (3, 0))
 
-class TestBleServer(unittest.TestCase):
-    def test_ble_server_instantiation(self):
-        server = BleServer()
-        self.assertFalse(server.is_running)
-        adapter_info = server.get_adapter_info()
-        self.assertIn("address", adapter_info)
-        self.assertIn("alias", adapter_info)
+    def test_keys_forwarded_and_repeat_ignored(self):
+        self.g.set_control(CONTROL_REMOTE)
+        self.g._maybe_finish_grab()
+        self.feed(key(e.KEY_LEFTSHIFT, 1), key(e.KEY_A, 1), key(e.KEY_A, 2), key(e.KEY_A, 2))
+        self.assertEqual(self.ble.kb, [(0x02, []), (0x02, [0x04])])
+        self.feed(key(e.KEY_A, 0))
+        self.assertEqual(self.ble.kb[-1], (0x02, []))
 
-    def test_report_encoding(self):
-        server = BleServer()
-        # Mock characteristics to test report generation
-        class MockChar:
-            def __init__(self):
-                self.last_val = None
-            def notify_value(self, val):
-                self.last_val = val
+    def test_clicks_are_immediate_motion_is_coalesced(self):
+        self.g.set_control(CONTROL_REMOTE)
+        self.g._maybe_finish_grab()
+        self.g._last_mouse_send = 10**9  # pretend we just sent
+        self.feed(rel(e.REL_X, 1), SYN, rel(e.REL_X, 1), SYN)
+        self.assertEqual(self.ble.mouse, [])  # coalesced, flushed later by the loop
+        self.feed(key(e.BTN_LEFT, 1))
+        self.assertEqual(self.ble.mouse[-1], (0x01, 2, 0, 0, 0))
 
-        server.kb_char = MockChar()
-        server.mouse_char = MockChar()
-
-        # Keyboard report test
-        server.send_keyboard_report(modifiers=0x01, keys=[0x04, 0x05])
-        self.assertEqual(len(server.kb_char.last_val), 8)
-        self.assertEqual(server.kb_char.last_val[0], 0x01)  # Modifiers
-        self.assertEqual(server.kb_char.last_val[1], 0x00)  # Reserved
-        self.assertEqual(server.kb_char.last_val[2], 0x04)  # Key 1
-        self.assertEqual(server.kb_char.last_val[3], 0x05)  # Key 2
-        self.assertEqual(server.kb_char.last_val[4:], b"\x00\x00\x00\x00")
-
-        # Mouse report test
-        server.send_mouse_report(buttons=0x01, dx=10, dy=-15, wheel=1, hwheel=-1)
-        self.assertEqual(len(server.mouse_char.last_val), 7)
-        self.assertEqual(server.mouse_char.last_val[0], 0x01)  # Button 1
-
-
-class TestInputGrabber(unittest.TestCase):
-    def test_device_discovery(self):
-        devices = list_input_devices()
-        self.assertIsInstance(devices, list)
-        self.assertGreater(len(devices), 0)
-
-        kbd, mouse = auto_detect_devices()
-        print(f"\n[Test] Auto-detected: Keyboard={kbd}, Mouse={mouse}")
-        self.assertIsNotNone(kbd)
-        self.assertIsNotNone(mouse)
-
-    def test_control_toggling(self):
-        server = BleServer()
-        grabber = InputGrabber(server)
-        self.assertEqual(grabber.current_control, CONTROL_LOCAL)
-
-        # Toggle to REMOTE
-        grabber.toggle_control()
-        self.assertEqual(grabber.current_control, CONTROL_REMOTE)
-
-        # Toggle back to LOCAL
-        grabber.toggle_control()
-        self.assertEqual(grabber.current_control, CONTROL_LOCAL)
+    def test_hotkey_toggles_back(self):
+        self.g.set_control(CONTROL_REMOTE)
+        self.g._maybe_finish_grab()
+        self.feed(key(e.KEY_LEFTCTRL, 1), key(e.KEY_LEFTALT, 1), key(e.KEY_S, 1))
+        self.assertEqual(self.g.current_control, CONTROL_LOCAL)
+        self.assertFalse(self.dev.grabbed)
 
 
-class TestClientHelper(unittest.TestCase):
-    def test_client_helper_instantiation(self):
-        client = ClientHelper()
-        self.assertFalse(client.is_scanning)
-        devices = client.get_devices()
-        self.assertIsInstance(devices, list)
+class TestIpc(unittest.TestCase):
+    def test_roundtrip(self):
+        tmpdir = tempfile.mkdtemp()
+        with mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": tmpdir}):
+            server = ipc.IpcServer(lambda cmd: {"ok": True, "echo": cmd})
+            self.assertTrue(server.start())
+            try:
+                self.assertEqual(ipc.request("STATUS"), {"ok": True, "echo": "status"})
+                self.assertEqual(oct(os.stat(ipc.socket_path()).st_mode & 0o777), "0o600")
+                self.assertFalse(ipc.IpcServer(lambda c: {}).start())  # second daemon refused
+            finally:
+                server.stop()
+            self.assertIsNone(ipc.request("status"))
 
-    def test_virtual_device_detection(self):
-        client = ClientHelper()
-        vdevs = client.detect_virtual_hid_devices("parrot")
-        self.assertIn("keyboard", vdevs)
-        self.assertIn("mouse", vdevs)
 
-
-class TestPyQt6Gui(unittest.TestCase):
-    def test_gui_offscreen_instantiation(self):
+class TestGui(unittest.TestCase):
+    def test_window_renders_every_state(self):
         from PyQt6.QtWidgets import QApplication
-        from src.gui.main_window import MainWindow
-
-        app = QApplication.instance()
-        if app is None:
-            app = QApplication(["blueshift_test", "-platform", "offscreen"])
-
-        window = MainWindow()
-        self.assertEqual(window.tab_widget.count(), 3)
-        self.assertIn("Host", window.tab_widget.tabText(0))
-        self.assertIn("Target", window.tab_widget.tabText(1))
-        self.assertIn("Settings", window.tab_widget.tabText(2))
-
-        # Test control state switch trigger in UI
-        window.grabber.set_control(CONTROL_REMOTE)
-        self.assertEqual(window.grabber.current_control, CONTROL_REMOTE)
-        window.grabber.set_control(CONTROL_LOCAL)
-        self.assertEqual(window.grabber.current_control, CONTROL_LOCAL)
-
-        window.close()
+        from src.gui import app as gui
+        self.qapp = QApplication.instance() or QApplication(["test"])
+        states = [
+            None,
+            {"ok": True, "role": "server", "control": "LOCAL", "ready": True, "ble": True,
+             "keyboards": 1, "mice": 1, "unreadable": 0, "host_name": "parrot",
+             "client_name": "archlab", "hotkey": "Ctrl + Alt + S"},
+            {"ok": True, "role": "client", "state": "pairing", "message": "Pairing…", "host_name": "parrot"},
+            {"ok": True, "role": "client", "state": "connected", "message": "", "host_name": "parrot"},
+        ]
+        for st in states:
+            with mock.patch.object(gui.ipc, "request", return_value=st):
+                w = gui.Window()
+                w.refresh()
+                self.assertIn("●", w.status.text())
+                w.close()
 
 
 if __name__ == "__main__":

@@ -231,7 +231,7 @@ EVDEV_TO_HID_KEY = {
 
     # Navigation & System
     e.KEY_PRINT: 0x46,
-    getattr(e, 'KEY_SYSRQ', 0x46): 0x46,
+    e.KEY_SYSRQ: 0x46,       # PrintScreen reports as SYSRQ on PC keyboards
     e.KEY_SCROLLLOCK: 0x47,
     e.KEY_PAUSE: 0x48,
     e.KEY_INSERT: 0x49,
@@ -264,10 +264,7 @@ EVDEV_TO_HID_KEY = {
     e.KEY_KP0: 0x62,
     e.KEY_KPDOT: 0x63,
 
-    # Miscellaneous
-    getattr(e, 'KEY_COMPOSE', 0x7F): 0x65,
-    getattr(e, 'KEY_POWER', 0x74): 0x66,
-    getattr(e, 'KEY_MUTE', 0x71): 0x7F,
-    getattr(e, 'KEY_VOLUMEDOWN', 0x72): 0x81,
-    getattr(e, 'KEY_VOLUMEUP', 0x73): 0x80,
+    # Miscellaneous (the report map's key array tops out at 0x65, so media keys can't be sent)
+    e.KEY_102ND: 0x64,       # ISO "<>" key next to left Shift
+    e.KEY_COMPOSE: 0x65,     # Menu / Application key
 }

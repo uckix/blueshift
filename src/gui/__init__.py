@@ -1,9 +1,3 @@
 """
-BlueShift GUI Package
+BlueShift GUI (a thin window over the background service's IPC).
 """
-
-from .style import apply_theme, DARK_THEME_QSS
-from .tray import BlueShiftTray
-from .main_window import MainWindow
-
-__all__ = ["apply_theme", "DARK_THEME_QSS", "BlueShiftTray", "MainWindow"]

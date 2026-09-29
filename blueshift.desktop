@@ -2,24 +2,16 @@
 Version=1.0
 Type=Application
 Name=BlueShift
-GenericName=Bluetooth Low Energy KVM Switch
-Comment=Switch keyboard and mouse seamlessly between Linux machines via Bluetooth Low Energy
+GenericName=Keyboard & Mouse Sharing
+Comment=Use one keyboard and mouse on two Linux PCs over Bluetooth
 Exec=blueshift
 Icon=blueshift
 Terminal=false
-Categories=Utility;HardwareSettings;System;
-Keywords=bluetooth;ble;kvm;keyboard;mouse;switch;hid;
+Categories=Utility;System;
+Keywords=bluetooth;ble;kvm;keyboard;mouse;switch;share;
 StartupNotify=true
-Actions=ToggleControl;RunServer;RunClient;
+Actions=Toggle;
 
-[Desktop Action ToggleControl]
-Name=Toggle Input Control
-Exec=blueshift --toggle
-
-[Desktop Action RunServer]
-Name=Start BLE Server Daemon
-Exec=blueshift --server
-
-[Desktop Action RunClient]
-Name=Start BLE Client Daemon
-Exec=blueshift --client
+[Desktop Action Toggle]
+Name=Switch keyboard & mouse
+Exec=blueshift toggle

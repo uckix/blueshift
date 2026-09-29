@@ -33,10 +33,11 @@ We expect all contributors and participants to follow the [Contributor Covenant]
 
 ### Reporting Bugs
 
-Before creating a bug report, please run our built-in diagnostic tool:
+Before creating a bug report, please collect the service state and log from both PCs:
 
 ```bash
-blueshift doctor
+blueshift status
+journalctl --user -u blueshift -n 100 --no-pager
 ```
 
 When filing an issue on [GitHub Issues](https://github.com/uckix/blueshift/issues), please provide:
@@ -108,21 +109,13 @@ sudo dnf install -y python3-devel python3-pip bluez bluez-libs-devel pkgconf
 
 ### 2. Permissions (Non-Root Operation)
 
-To capture input events and interact with the Bluetooth subsystem without running as `root`, add your user to the appropriate groups:
+To read keyboards and mice without running as `root`, install the project udev rule
+(`./install.sh` does this for you):
 
 ```bash
-sudo usermod -aG input,bluetooth $USER
+sudo install -m 644 udev/70-blueshift-input.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger --subsystem-match=input --action=change
 ```
-
-Install the project udev rule to allow access to `/dev/uinput`:
-
-```bash
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-blueshift-uinput.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-```
-
-> [!NOTE]
-> Log out and log back in (or run `newgrp input`) for group membership changes to take effect.
 
 ### 3. Python Virtual Environment
 

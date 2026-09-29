@@ -12,13 +12,13 @@ long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists
 
 setup(
     name="blueshift",
-    version="1.0.0",
+    version="2.0.0",
     description="Bluetooth Low Energy KVM Switch for Linux",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="BlueShift Team",
+    author="uckix",
     packages=find_packages(),
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=[
         "PyQt6>=6.4.0",
         "evdev>=1.6.0",
@@ -31,7 +31,7 @@ setup(
         ],
     },
     classifiers=[
-        "Development Status :: 5 - Production/Stable",
+        "Development Status :: 4 - Beta",
         "Environment :: X11 Applications :: Qt",
         "Intended Audience :: End Users/Desktop",
         "License :: OSI Approved :: MIT License",

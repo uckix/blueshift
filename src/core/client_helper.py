@@ -1,364 +1,309 @@
 """
-BlueShift Target / Client Helper.
-Provides host Bluetooth scanning, pairing & connection management,
-auto-reconnect daemon, virtual HID device verification, and link health monitoring.
+BlueShift target side: keeps this PC linked to the host's BLE keyboard/mouse.
+
+The two PCs are usually already bonded over *classic* Bluetooth. BlueZ then always
+picks the classic bearer for Connect(), which never carries HID-over-GATT, so the
+keyboard/mouse never appear. We therefore pair over LE explicitly (scan with an LE
+transport filter, then Pair(): with a classic bond present BlueZ bonds the LE bearer)
+and let BlueZ's HOG plugin auto-reconnect from then on.
 """
 
-import os
-import sys
+import glob
 import time
 import logging
 import threading
-import subprocess
-from typing import Optional, Dict, List, Any, Callable
+from pathlib import Path
+from typing import Optional, Dict, List, Any
 
 import dbus
-import dbus.mainloop.glib
-import evdev
-from evdev import ecodes as e
+import dbus.service
 
-from .hid_constants import (
-    BLUEZ_SERVICE_NAME, ADAPTER_IFACE, DEVICE_IFACE,
-    DBUS_PROP_IFACE, DBUS_OM_IFACE
-)
+from .hid_constants import BLUEZ_SERVICE_NAME, ADAPTER_IFACE, DEVICE_IFACE, DBUS_PROP_IFACE, DBUS_OM_IFACE
 from .config import config
 
 logger = logging.getLogger("blueshift.client")
 
+AGENT_IFACE = "org.bluez.Agent1"
+AGENT_MGR_IFACE = "org.bluez.AgentManager1"
+AGENT_PATH = "/org/bluez/blueshift/agent"
 
-class ClientHelper:
-    """Manages Client Mode operations on the secondary PC receiving input."""
+STATE_NO_HOST = "no_host"
+STATE_IDLE = "idle"
+STATE_SEARCHING = "searching"
+STATE_PAIRING = "pairing"
+STATE_CONNECTING = "connecting"
+STATE_CONNECTED = "connected"
+
+RETRY_INTERVAL = 20.0  # seconds between automatic reconnect attempts
+
+
+def _mac_to_path_part(mac: str) -> str:
+    return "dev_" + mac.upper().replace(":", "_")
+
+
+def host_input_devices(host_mac: str) -> List[str]:
+    """Names of input devices the kernel created for the host's BLE HID link."""
+    if not host_mac:
+        return []
+    found = []
+    for uniq_file in glob.glob("/sys/class/input/input*/uniq"):
+        try:
+            if Path(uniq_file).read_text().strip().upper() == host_mac.upper():
+                found.append(Path(uniq_file).with_name("name").read_text().strip())
+        except OSError:
+            pass
+    return found
+
+
+def known_devices() -> List[Dict[str, Any]]:
+    """Bluetooth devices BlueZ knows about (for the settings picker)."""
+    from .bus import get_bus
+    devices = []
+    try:
+        objects = dbus.Interface(get_bus().get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE).GetManagedObjects()
+    except dbus.exceptions.DBusException as err:
+        logger.debug("Cannot list devices: %s", err)
+        return devices
+    for _path, ifaces in objects.items():
+        dev = ifaces.get(DEVICE_IFACE)
+        if dev is None:
+            continue
+        devices.append({
+            "address": str(dev.get("Address", "")),
+            "name": str(dev.get("Alias", dev.get("Name", ""))),
+            "paired": bool(dev.get("Paired", False)),
+            "connected": bool(dev.get("Connected", False)),
+            "icon": str(dev.get("Icon", "")),
+        })
+    devices.sort(key=lambda d: (d["icon"] != "computer", not d["paired"], d["name"].lower()))
+    return devices
+
+
+class PairingAgent(dbus.service.Object):
+    """Auto-accepts pairing, but only with the configured host."""
+
+    def _check(self, device):
+        mac = config.get("host_mac", "")
+        if not mac or not str(device).endswith(_mac_to_path_part(mac)):
+            raise dbus.exceptions.DBusException("org.bluez.Error.Rejected", "Not the BlueShift host")
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Release(self):
+        pass
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def AuthorizeService(self, device, uuid):
+        self._check(device)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="s")
+    def RequestPinCode(self, device):
+        self._check(device)
+        return "0000"
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="u")
+    def RequestPasskey(self, device):
+        self._check(device)
+        return dbus.UInt32(0)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ouq", out_signature="")
+    def DisplayPasskey(self, device, passkey, entered):
+        pass
+
+    @dbus.service.method(AGENT_IFACE, in_signature="os", out_signature="")
+    def DisplayPinCode(self, device, pincode):
+        pass
+
+    @dbus.service.method(AGENT_IFACE, in_signature="ou", out_signature="")
+    def RequestConfirmation(self, device, passkey):
+        self._check(device)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="o", out_signature="")
+    def RequestAuthorization(self, device):
+        self._check(device)
+
+    @dbus.service.method(AGENT_IFACE, in_signature="", out_signature="")
+    def Cancel(self):
+        pass
+
+
+class ClientLink:
+    """Background worker that gets and keeps the host's keyboard/mouse on this PC."""
 
     def __init__(self, adapter_path: str = "/org/bluez/hci0"):
         self.adapter_path = adapter_path
-        self.bus: Optional[dbus.SystemBus] = None
-        self.is_scanning = False
-        self.is_reconnect_running = False
+        self.bus = None
+        self.state = STATE_IDLE
+        self.message = ""
+        self.devices: List[str] = []
+        self._agent: Optional[PairingAgent] = None
+        self._thread: Optional[threading.Thread] = None
+        self._stop = threading.Event()
+        self._kick = threading.Event()
+        self._repair_requested = False
+        self._last_attempt = 0.0
 
-        self._reconnect_thread: Optional[threading.Thread] = None
-        self._reconnect_stop = threading.Event()
+    # ------------------------------------------------------------------ lifecycle
 
-        # Callbacks
-        self.on_devices_scanned: Optional[Callable[[List[Dict[str, Any]]], None]] = None
-        self.on_connection_state: Optional[Callable[[bool, Dict[str, Any]], None]] = None
-        self.on_health_update: Optional[Callable[[Dict[str, Any]], None]] = None
+    def start(self):
+        from .bus import get_bus
+        self.bus = get_bus()
+        self._register_agent()
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="BlueShift-Client", daemon=True)
+        self._thread.start()
 
-    def _ensure_dbus(self):
-        if not dbus.mainloop.glib.threads_init():
-            try:
-                dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-            except Exception:
-                pass
-        if self.bus is None:
-            self.bus = dbus.SystemBus()
+    def stop(self):
+        self._stop.set()
+        self._kick.set()
+        if self._thread:
+            self._thread.join(timeout=3.0)
 
-    def start_discovery(self, timeout: float = 10.0) -> bool:
-        """Start Bluetooth LE discovery scan for nearby BlueShift hosts."""
+    def connect_now(self, repair: bool = False):
+        self._repair_requested = self._repair_requested or repair
+        self._last_attempt = 0.0
+        self._kick.set()
+
+    def status(self) -> Dict[str, Any]:
+        return {"state": self.state, "message": self.message, "devices": self.devices}
+
+    # ------------------------------------------------------------------ internals
+
+    def _register_agent(self):
         try:
-            self._ensure_dbus()
-            adapter_obj = self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path)
-            adapter = dbus.Interface(adapter_obj, ADAPTER_IFACE)
+            if self._agent is None:
+                self._agent = PairingAgent(self.bus, AGENT_PATH)
+            mgr = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/org/bluez"), AGENT_MGR_IFACE)
+            mgr.RegisterAgent(AGENT_PATH, "NoInputNoOutput")
+        except dbus.exceptions.DBusException as err:
+            if "AlreadyExists" not in str(err):
+                logger.warning("Could not register pairing agent: %s", err)
 
-            # Set discovery filter for BLE
-            try:
-                adapter.SetDiscoveryFilter({"Transport": "le"})
-            except Exception:
-                pass
+    def _set(self, state: str, message: str = ""):
+        if (state, message) != (self.state, self.message):
+            logger.info("Link: %s %s", state, message)
+        self.state, self.message = state, message
 
-            adapter.StartDiscovery()
-            self.is_scanning = True
-            logger.info("Bluetooth discovery started.")
+    def _loop(self):
+        while not self._stop.is_set():
+            host = config.get("host_mac", "")
+            self.devices = host_input_devices(host)
+            if not host:
+                self._set(STATE_NO_HOST, "Choose the host PC in Settings")
+            elif self.devices and not self._repair_requested:
+                if not config.get("le_paired"):
+                    config.set("le_paired", True)
+                self._set(STATE_CONNECTED)
+            else:
+                due = time.monotonic() - self._last_attempt >= RETRY_INTERVAL
+                if self._repair_requested or (due and config.get("auto_reconnect", True)):
+                    self._last_attempt = time.monotonic()
+                    repair, self._repair_requested = self._repair_requested, False
+                    try:
+                        self._attempt(host, repair)
+                    except dbus.exceptions.DBusException as err:
+                        self._set(STATE_IDLE, f"Bluetooth error: {err.get_dbus_message() or err}")
+                    self._last_attempt = time.monotonic()
+                elif self.state in (STATE_CONNECTED, STATE_NO_HOST):
+                    self._set(STATE_IDLE, "Waiting for the host…")
+            self._kick.wait(2.0)
+            self._kick.clear()
 
-            # Stop scanning after timeout
-            def _auto_stop():
-                time.sleep(timeout)
-                self.stop_discovery()
+    def _adapter(self):
+        return self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path)
 
-            threading.Thread(target=_auto_stop, daemon=True).start()
-            return True
-        except Exception as e:
-            logger.warning("Failed to start discovery: %s", e)
-            self.is_scanning = False
-            return False
+    def _device_path(self, mac: str) -> str:
+        return f"{self.adapter_path}/{_mac_to_path_part(mac)}"
 
-    def stop_discovery(self) -> bool:
-        """Stop active Bluetooth discovery scan."""
+    def _device_props(self, mac: str) -> Optional[Dict[str, Any]]:
         try:
-            if not self.is_scanning:
+            return dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self._device_path(mac)),
+                                  DBUS_PROP_IFACE).GetAll(DEVICE_IFACE)
+        except dbus.exceptions.DBusException:
+            return None
+
+    def _wait_for_input(self, mac: str, seconds: float) -> bool:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not self._stop.is_set():
+            self.devices = host_input_devices(mac)
+            if self.devices:
                 return True
-            self._ensure_dbus()
-            adapter_obj = self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path)
-            adapter = dbus.Interface(adapter_obj, ADAPTER_IFACE)
-            adapter.StopDiscovery()
-            self.is_scanning = False
-            logger.info("Bluetooth discovery stopped.")
-            return True
-        except Exception as e:
-            logger.debug("StopDiscovery: %s", e)
-            self.is_scanning = False
-            return False
+            time.sleep(0.5)
+        return False
 
-    def get_devices(self) -> List[Dict[str, Any]]:
-        """List all discovered or paired Bluetooth devices."""
-        devices = []
+    def _scan_le(self, mac: str, seconds: float = 12.0) -> bool:
+        """LE-only discovery until the host's advertisement is seen."""
+        adapter = dbus.Interface(self._adapter(), ADAPTER_IFACE)
         try:
-            self._ensure_dbus()
-            manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
-            objects = manager.GetManagedObjects()
-
-            for path, ifaces in objects.items():
-                if DEVICE_IFACE in ifaces:
-                    dev = ifaces[DEVICE_IFACE]
-                    address = str(dev.get("Address", ""))
-                    name = str(dev.get("Name", dev.get("Alias", "Unknown")))
-                    alias = str(dev.get("Alias", name))
-                    connected = bool(dev.get("Connected", False))
-                    paired = bool(dev.get("Paired", False))
-                    rssi = int(dev.get("RSSI", -99)) if "RSSI" in dev else None
-                    uuids = [str(u) for u in dev.get("UUIDs", [])]
-
-                    # Detect if device advertises HID
-                    is_hid = any("1812" in u.lower() for u in uuids)
-
-                    devices.append({
-                        "path": str(path),
-                        "address": address,
-                        "name": name,
-                        "alias": alias,
-                        "connected": connected,
-                        "paired": paired,
-                        "rssi": rssi,
-                        "is_hid": is_hid,
-                    })
-        except Exception as e:
-            logger.error("Failed to query Bluetooth devices: %s", e)
-        return devices
-
-    def connect_device(self, address: str) -> bool:
-        """Connect to a Bluetooth host by MAC address."""
+            adapter.SetDiscoveryFilter({"Transport": "le", "DuplicateData": dbus.Boolean(True)})
+        except dbus.exceptions.DBusException as err:
+            logger.debug("SetDiscoveryFilter: %s", err)
+        started = False
         try:
-            self._ensure_dbus()
-            dev_path = self._find_device_path(address)
-            if not dev_path:
-                logger.error("Device with MAC %s not found in BlueZ database", address)
-                return False
-
-            dev_obj = self.bus.get_object(BLUEZ_SERVICE_NAME, dev_path)
-            dev_iface = dbus.Interface(dev_obj, DEVICE_IFACE)
-            props_iface = dbus.Interface(dev_obj, DBUS_PROP_IFACE)
-
-            # Trust the device so reconnections are automatic
-            try:
-                props_iface.Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
-            except Exception:
-                pass
-
-            paired = bool(props_iface.Get(DEVICE_IFACE, "Paired"))
-            if not paired:
-                try:
-                    logger.info("Pairing with %s...", address)
-                    dev_iface.Pair()
-                except Exception as e:
-                    logger.debug("Pairing notice: %s", e)
-
-            logger.info("Connecting to %s...", address)
-            dev_iface.Connect()
-            logger.info("Connected to %s successfully!", address)
-            return True
-        except Exception as e:
-            logger.error("Connection to %s failed: %s", address, e)
-            return False
-
-    def disconnect_device(self, address: str) -> bool:
-        """Disconnect from a Bluetooth host."""
-        try:
-            self._ensure_dbus()
-            dev_path = self._find_device_path(address)
-            if not dev_path:
-                return False
-
-            dev_obj = self.bus.get_object(BLUEZ_SERVICE_NAME, dev_path)
-            dev_iface = dbus.Interface(dev_obj, DEVICE_IFACE)
-            dev_iface.Disconnect()
-            logger.info("Disconnected from %s", address)
-            return True
-        except Exception as e:
-            logger.warning("Disconnect failed: %s", e)
-            return False
-
-    def _find_device_path(self, address: str) -> Optional[str]:
-        """Convert a MAC address into a BlueZ DBus object path."""
-        target = address.upper().replace(":", "_")
-        manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
-        for path, ifaces in manager.GetManagedObjects().items():
-            if DEVICE_IFACE in ifaces:
-                dev_addr = str(ifaces[DEVICE_IFACE].get("Address", "")).upper().replace(":", "_")
-                if dev_addr == target or target in str(path).upper():
-                    return str(path)
-
-        # If not cached, trigger a brief 2s discovery to pick up the advertisement
-        try:
-            adapter = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, self.adapter_path), ADAPTER_IFACE)
             adapter.StartDiscovery()
-            time.sleep(2)
-            adapter.StopDiscovery()
-            for path, ifaces in manager.GetManagedObjects().items():
-                if DEVICE_IFACE in ifaces:
-                    dev_addr = str(ifaces[DEVICE_IFACE].get("Address", "")).upper().replace(":", "_")
-                    if dev_addr == target or target in str(path).upper():
-                        return str(path)
-        except Exception:
-            pass
-
-        return None
-
-    # ========================================================================
-    # Virtual Input Device Detection
-    # ========================================================================
-
-    def detect_virtual_hid_devices(self, host_alias: str = "parrot") -> Dict[str, Any]:
-        """
-        Verify whether Linux kernel has created virtual HID input devices
-        corresponding to the connected host (e.g. 'parrot Keyboard', 'parrot Mouse').
-        """
-        result = {
-            "keyboard": {"detected": False, "name": "Not Detected", "path": ""},
-            "mouse": {"detected": False, "name": "Not Detected", "path": ""},
-            "all_found": False,
-        }
-
-        alias_lower = host_alias.lower()
-        for path in evdev.list_devices():
-            try:
-                dev = evdev.InputDevice(path)
-                d_name = dev.name.lower()
-                caps = dev.capabilities()
-
-                # Check if device matches host name or BlueShift or generic combo
-                matches_host = (alias_lower in d_name) or ("blueshift" in d_name) or ("combo" in d_name)
-
-                # Check capabilities
-                has_keys = e.EV_KEY in caps
-                has_rel = e.EV_REL in caps
-
-                if has_keys and not result["keyboard"]["detected"]:
-                    key_set = set(caps[e.EV_KEY])
-                    if e.KEY_A in key_set and e.KEY_SPACE in key_set and not has_rel:
-                        if matches_host or "keyboard" in d_name:
-                            result["keyboard"] = {
-                                "detected": True,
-                                "name": dev.name,
-                                "path": path,
-                            }
-
-                if has_rel and not result["mouse"]["detected"]:
-                    if e.EV_KEY in caps:
-                        key_set = set(caps[e.EV_KEY])
-                        if e.BTN_LEFT in key_set:
-                            if matches_host or "mouse" in d_name:
-                                result["mouse"] = {
-                                "detected": True,
-                                "name": dev.name,
-                                "path": path,
-                            }
-            except Exception:
-                pass
-
-        result["all_found"] = result["keyboard"]["detected"] and result["mouse"]["detected"]
-        return result
-
-    # ========================================================================
-    # Connection Health & Metrics Dashboard
-    # ========================================================================
-
-    def get_connection_health(self, target_address: Optional[str] = None) -> Dict[str, Any]:
-        """Fetch connection health, latency, signal strength, and battery status."""
-        addr = target_address or config.get("client_mac", "")
-        health = {
-            "connected": False,
-            "address": addr,
-            "alias": config.get("client_name", "Remote Host"),
-            "rssi": -65,
-            "rssi_quality": "Good",
-            "latency_ms": 6.8,  # BLE typical HID connection interval latency
-            "battery_percent": 100,
-            "paired": False,
-            "trusted": False,
-        }
-
+            started = True
+        except dbus.exceptions.DBusException as err:
+            if "InProgress" not in str(err):
+                raise
         try:
-            self._ensure_dbus()
-            dev_path = self._find_device_path(addr)
-            if dev_path:
-                dev_obj = self.bus.get_object(BLUEZ_SERVICE_NAME, dev_path)
-                props_iface = dbus.Interface(dev_obj, DBUS_PROP_IFACE)
-                props = props_iface.GetAll(DEVICE_IFACE)
+            end = time.monotonic() + seconds
+            while time.monotonic() < end and not self._stop.is_set():
+                props = self._device_props(mac)
+                if props is not None and "RSSI" in props:
+                    return True
+                time.sleep(0.5)
+            return False
+        finally:
+            if started:
+                try:
+                    adapter.StopDiscovery()
+                except dbus.exceptions.DBusException:
+                    pass
 
-                health["connected"] = bool(props.get("Connected", False))
-                health["paired"] = bool(props.get("Paired", False))
-                health["trusted"] = bool(props.get("Trusted", False))
-                health["alias"] = str(props.get("Alias", props.get("Name", health["alias"])))
+    def _attempt(self, mac: str, repair: bool):
+        name = config.get("host_name") or mac
+        props = dbus.Interface(self._adapter(), DBUS_PROP_IFACE)
+        if not bool(props.Get(ADAPTER_IFACE, "Powered")):
+            props.Set(ADAPTER_IFACE, "Powered", dbus.Boolean(True))
 
-                if "RSSI" in props:
-                    rssi = int(props["RSSI"])
-                    health["rssi"] = rssi
-                    if rssi >= -60:
-                        health["rssi_quality"] = "Excellent"
-                    elif rssi >= -75:
-                        health["rssi_quality"] = "Good"
-                    else:
-                        health["rssi_quality"] = "Weak"
+        if repair:
+            self._set(STATE_SEARCHING, f"Forgetting old pairing with {name}…")
+            try:
+                dbus.Interface(self._adapter(), ADAPTER_IFACE).RemoveDevice(self._device_path(mac))
+            except dbus.exceptions.DBusException:
+                pass
+            config.set("le_paired", False)
+            time.sleep(1.0)
 
-                # Check Battery1 interface if available
-                manager = dbus.Interface(self.bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
-                obj = manager.GetManagedObjects().get(dev_path, {})
-                if "org.bluez.Battery1" in obj:
-                    health["battery_percent"] = int(obj["org.bluez.Battery1"].get("Percentage", 100))
-        except Exception as e:
-            logger.debug("get_connection_health error: %s", e)
-
-        return health
-
-    # ========================================================================
-    # Auto-Reconnect Daemon
-    # ========================================================================
-
-    def start_auto_reconnect(self, target_address: Optional[str] = None):
-        """Start auto-reconnect background loop."""
-        if self.is_reconnect_running:
+        self._set(STATE_SEARCHING, f"Looking for {name}…")
+        if not self._scan_le(mac):
+            self._set(STATE_IDLE, f"Can't see {name}. Is BlueShift running there, with Bluetooth on?")
             return
 
-        self._reconnect_stop.clear()
-        self.is_reconnect_running = True
-        addr = target_address or config.get("client_mac", "")
+        dev_obj = self.bus.get_object(BLUEZ_SERVICE_NAME, self._device_path(mac))
+        dev = dbus.Interface(dev_obj, DEVICE_IFACE)
+        dbus.Interface(dev_obj, DBUS_PROP_IFACE).Set(DEVICE_IFACE, "Trusted", dbus.Boolean(True))
 
-        def _loop():
-            logger.info("Auto-reconnect daemon started for %s", addr)
-            while not self._reconnect_stop.is_set():
-                try:
-                    health = self.get_connection_health(addr)
-                    if not health["connected"]:
-                        logger.info("Host %s disconnected. Attempting auto-reconnect...", addr)
-                        self.connect_device(addr)
+        if not config.get("le_paired"):
+            self._set(STATE_PAIRING, f"Pairing with {name}… accept the request on {name} if asked")
+            try:
+                dev.Pair(timeout=60)
+            except dbus.exceptions.DBusException as err:
+                if "AlreadyExists" not in (err.get_dbus_name() or ""):
+                    self._set(STATE_IDLE, f"Pairing failed ({err.get_dbus_message()}). "
+                                          f"Accept the pairing prompt on {name}, or press Re-pair.")
+                    return
 
-                    if self.on_health_update:
-                        self.on_health_update(health)
-                except Exception as e:
-                    logger.debug("Auto-reconnect tick error: %s", e)
-
-                self._reconnect_stop.wait(4.0)
-            logger.info("Auto-reconnect daemon stopped.")
-
-        self._reconnect_thread = threading.Thread(target=_loop, name="BlueShift-AutoReconnect", daemon=True)
-        self._reconnect_thread.start()
-
-    def stop_auto_reconnect(self):
-        """Stop auto-reconnect background loop."""
-        self.is_reconnect_running = False
-        self._reconnect_stop.set()
-        if self._reconnect_thread and self._reconnect_thread.is_alive():
-            self._reconnect_thread.join(timeout=1.0)
+        self._set(STATE_CONNECTING, f"Connecting to {name}…")
+        try:
+            dev.Connect(timeout=30)
+        except dbus.exceptions.DBusException as err:
+            logger.debug("Connect: %s", err)
+        if self._wait_for_input(mac, 15.0):
+            config.set("le_paired", True)
+            self._set(STATE_CONNECTED)
+        else:
+            self._set(STATE_IDLE, f"Linked to {name} but no keyboard appeared yet. Press Re-pair if this persists.")
 
 
 # Global singleton instance
-client_helper = ClientHelper()
+client_link = ClientLink()

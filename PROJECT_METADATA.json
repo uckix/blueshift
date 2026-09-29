@@ -3,7 +3,7 @@
   "displayName": "BlueShift",
   "tagline": "Zero-Lag Bluetooth KVM for Linux",
   "shortDescription": "High-performance Bluetooth Low Energy (BLE HOGP) KVM switch for Linux. Share a single keyboard and mouse across two computers with zero Wi-Fi lag, kernel-level evdev grabbing, and instant hotkey switching.",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "license": "MIT",
   "copyright": "Copyright (c) 2026 uckix",
   "author": {
@@ -62,16 +62,16 @@
     }
   },
   "defaultHotkeys": [
+    "Ctrl + Alt + S (Default chord toggle)",
     "ScrollLock (Single-tap toggle)",
-    "Ctrl + Alt + S (Chord toggle)",
-    "Pause / Break (Alternative toggle)"
+    "Pause / Break (Alternative toggle)",
+    "Right Alt (Alternative toggle)"
   ],
   "cliCommands": {
-    "daemon": "blueshift daemon --run",
-    "gui": "blueshift gui",
-    "switch": "blueshift switch [host|target|toggle]",
+    "gui": "blueshift",
+    "daemon": "blueshift daemon",
+    "switch": "blueshift toggle | local | remote",
     "status": "blueshift status",
-    "doctor": "blueshift doctor",
-    "pair": "blueshift pair --target <MAC_ADDRESS>"
+    "connect": "blueshift connect | repair"
   }
 }

@@ -1,0 +1,5 @@
+# BlueShift: let the logged-in user read/grab keyboards and mice.
+# "uaccess" grants an ACL to the active session's user only (unlike MODE="0666",
+# which lets every local account keylog). It must run before 73-seat-late.rules.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", TAG+="uaccess"

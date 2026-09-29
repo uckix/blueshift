@@ -4,23 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blueshift"
-version = "1.0.0"
+version = "2.0.0"
 description = "Bluetooth Low Energy KVM Switch for Linux"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "BlueShift Team" }
+    { name = "uckix" }
 ]
 keywords = ["bluetooth", "ble", "kvm", "bluez", "evdev", "pyqt6"]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Environment :: X11 Applications :: Qt",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
