@@ -30,7 +30,7 @@ fi
 echo -e "\n${BLUE}[1/6] Verifying Python runtime and core libraries...${NC}"
 python3 -c "import PyQt6, evdev, dbus, gi" 2>/dev/null || {
     echo -e "${YELLOW}Notice: Installing missing Python packages via pip...${NC}"
-    pip3 install --quiet PyQt6 evdev dbus-python PyGObject || true
+    pip3 install --quiet --break-system-packages PyQt6 evdev dbus-python PyGObject 2>/dev/null || pip3 install --quiet PyQt6 evdev dbus-python PyGObject 2>/dev/null || true
 }
 echo -e "${GREEN}✔ Python environment verified.${NC}"
 
